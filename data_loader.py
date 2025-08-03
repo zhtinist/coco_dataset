@@ -1,16 +1,31 @@
 import os
 import json
 from PIL import Image
-from torch.utils.data import Dataset
+import torch
+from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from transformers import AutoTokenizer
+
+
+def collate_fn(batch):
+    image_tensors, input_ids, attention_mask = zip(*batch)
+    image_tensors = torch.concat([t.unsqueeze(0) for t in image_tensors], dim=0)
+    input_ids = torch.concat([t.unsqueeze(0) for t in input_ids], dim=0)
+    attention_mask = torch.concat([t.unsqueeze(0) for t in attention_mask], dim=0)
+    return image_tensors, input_ids, attention_mask
+
+
+# TODO: create a dataloader based on the Dataset class
+def get_dataloader(dataset, batch_size, shuffle=True, num_workers=0, drop_last=True):
+    return DataLoader(dataset=dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, collate_fn=collate_fn, drop_last=drop_last)
+
 
 class COCODataset(Dataset):
     def __init__(self,
                  root: str = r"D:\\datasets\\coco\\train2017",  # <<< 改这里
-                 split: str = "train",
-                 tokenizer_name: str = "distilbert-base-uncased",
-                 max_length: int = 32):
+                 split: str = "train",  # TODO: use CLIP image processor
+                 tokenizer_name: str = "distilbert-base-uncased",  # TODO: use CLIP tokenizer `openai/clip-vit-base-patch32`
+                 max_length: int = 32):  # TODO: check caption annotation distribution to decide the optimal max_length
         super().__init__()
         self.root = root
         self.split = split
@@ -72,11 +87,19 @@ class COCODataset(Dataset):
         return image, input_ids, attention_mask
 
 
-
 if __name__ == "__main__":
-    ds = COCODataset(split="train")
+    ds = COCODataset(root=r"C:\Users\61556\Downloads\data\coco", split="val")
     print("Dataset size:", len(ds))
     img, ids, mask = ds[0]
     print("Image shape:", img.shape)
     print("Token ids shape:", ids.shape)
     print("Attention mask shape:", mask.shape)
+
+    # create dataloader:
+    dataloader = get_dataloader(dataset=ds, batch_size=4)
+    for batch in dataloader:
+        image_tensors, input_ids, attention_mask = batch
+        print(f"Batch image tensors shape: {image_tensors.shape}")
+        print(f"Batch input IDs shape: {input_ids.shape}")
+        print(f"Batch Attention Mask shape: {attention_mask.shape}")
+        break
