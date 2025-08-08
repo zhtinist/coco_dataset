@@ -1,22 +1,62 @@
 import os
 import json
 from PIL import Image
-from torch.utils.data import Dataset
-from torchvision import transforms
-from transformers import AutoTokenizer
+import torch
+from torch.utils.data import Dataset, DataLoader
+from transformers import CLIPTokenizer, CLIPImageProcessor
 
+
+# ---------- collate_fn ----------
+def collate_fn(batch):
+    image_tensors, input_ids, attention_mask = zip(*batch)
+    image_tensors = torch.cat([t.unsqueeze(0) for t in image_tensors], dim=0)
+    input_ids = torch.cat([t.unsqueeze(0) for t in input_ids], dim=0)
+    attention_mask = torch.cat([t.unsqueeze(0) for t in attention_mask], dim=0)
+    return image_tensors, input_ids, attention_mask
+
+
+# ---------- DataLoader 封装 ----------
+def get_dataloader(dataset,
+                   batch_size: int,
+                   shuffle: bool = True,
+                   num_workers: int = 0,
+                   drop_last: bool = True) -> DataLoader:
+    """
+    根据 COCODataset 构建 DataLoader。
+
+    Args:
+        dataset (COCODataset): 已实例化的 COCODataset。
+        batch_size (int): 批次大小。
+        shuffle (bool, optional): 是否打乱数据。默认 True。
+        num_workers (int, optional): 子进程加载数据数量。默认 0。
+        drop_last (bool, optional): 是否丢弃最后一个不完整的批次。默认 True。
+
+    Returns:
+        DataLoader: 配置好的 PyTorch DataLoader。
+    """
+    return DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        drop_last=drop_last,
+        pin_memory=True
+    )
+
+
+# ---------- COCO 数据集 ----------
 class COCODataset(Dataset):
     def __init__(self,
-                 root: str = r"D:\\datasets\\coco\\train2017",  # <<< 改这里
+                 root: str = r"D:\datasets\coco",
                  split: str = "train",
-                 tokenizer_name: str = "distilbert-base-uncased",
-                 max_length: int = 32):
+                 max_length: int = 77):      # CLIP 文本最大长度
         super().__init__()
         self.root = root
         self.split = split
         self.max_length = max_length
 
-        # 1. 读取标注
+        # 1. 读取标注文件
         anno_file = os.path.join(root, "annotations", f"captions_{split}2017.json")
         with open(anno_file, encoding="utf-8") as f:
             anno = json.load(f)
@@ -28,25 +68,18 @@ class COCODataset(Dataset):
             img2caps.setdefault(img_id, []).append(cap["caption"])
 
         # image_id -> file_name
-        id2fname = {img["id"]: img["file_name"]
-                    for img in anno["images"]}
+        id2fname = {img["id"]: img["file_name"] for img in anno["images"]}
 
-        # 2. 构造样本列表
-        self.samples = [(img_id, cap) for img_id, caps in img2caps.items() for cap in caps]
+        # 2. 构造样本列表：[(image_id, caption), ...]
+        self.samples = [(img_id, cap)
+                        for img_id, caps in img2caps.items()
+                        for cap in caps]
         self.id2fname = id2fname
 
-        # tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        # 3. 图像变换
-        self.transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
-                                 std=[0.26862954, 0.26130258, 0.27577711]),
-        ])
+        # 3. CLIP tokenizer & image_processor
+        model_name = "openai/clip-vit-base-patch32"
+        self.tokenizer = CLIPTokenizer.from_pretrained(model_name)
+        self.image_processor = CLIPImageProcessor.from_pretrained(model_name)
 
     def __len__(self):
         return len(self.samples)
@@ -57,8 +90,12 @@ class COCODataset(Dataset):
 
         img_path = os.path.join(self.root, f"{self.split}2017", fname)
         image = Image.open(img_path).convert("RGB")
-        image = self.transform(image)
 
+        # CLIP 官方图像预处理
+        pixel_values = self.image_processor(
+            images=image, return_tensors="pt")["pixel_values"].squeeze(0)
+
+        # CLIP 官方文本编码
         enc = self.tokenizer(
             caption,
             max_length=self.max_length,
@@ -69,14 +106,22 @@ class COCODataset(Dataset):
         input_ids = enc["input_ids"].squeeze(0)
         attention_mask = enc["attention_mask"].squeeze(0)
 
-        return image, input_ids, attention_mask
+        return pixel_values, input_ids, attention_mask
 
 
-
+# ---------- 本地测试 ----------
 if __name__ == "__main__":
-    ds = COCODataset(split="train")
+    ds = COCODataset(root=r"C:\Users\61556\Downloads\data\coco", split="val")
     print("Dataset size:", len(ds))
+
     img, ids, mask = ds[0]
     print("Image shape:", img.shape)
     print("Token ids shape:", ids.shape)
     print("Attention mask shape:", mask.shape)
+
+    loader = get_dataloader(ds, batch_size=4, shuffle=True)
+    for imgs, ids, mask in loader:
+        print("Batch image tensors shape:", imgs.shape)
+        print("Batch input IDs shape:", ids.shape)
+        print("Batch attention mask shape:", mask.shape)
+        break
