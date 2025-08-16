@@ -1,181 +1,172 @@
-import math
-from typing import Optional, Tuple
-
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
+import math
 
 
-def my_multi_head_attention(
-    query: Tensor,
-    key: Tensor,
-    value: Tensor,
-    embed_dim: int,
-    num_heads: int,
-    dropout: float = 0.0,
-    bias: bool = True,
-    kdim: Optional[int] = None,
-    vdim: Optional[int] = None,
-    key_padding_mask: Optional[Tensor] = None,
-    attn_mask: Optional[Tensor] = None,
-    batch_first: bool = False,
-    need_weights: bool = True,
-    average_attn_weights: bool = True,
-) -> Tuple[Tensor, Optional[Tensor]]:
-    """
-    Re-implementation of torch.nn.MultiheadAttention.forward.
+class CustomMultiheadAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads, dropout=0.0, bias=True,
+                 add_bias_kv=False, add_zero_attn=False, kdim=None, vdim=None, batch_first=False, device=None, dtype=None):
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.kdim = kdim if kdim is not None else embed_dim
+        self.vdim = vdim if vdim is not None else embed_dim
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.batch_first = batch_first
+        assert self.embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        
+        self.head_dim = embed_dim // num_heads
 
-    Args:
-        query, key, value: (*, L, E) if batch_first else (L, *, E)
-        ...其余参数与官方文档含义完全一致...
+        # projection layers
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias, **factory_kwargs)
+        self.k_proj = nn.Linear(self.kdim, embed_dim, bias=bias, **factory_kwargs)
+        self.v_proj = nn.Linear(self.vdim, embed_dim, bias=bias, **factory_kwargs)
+        
+        # output projection
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias, **factory_kwargs)
+        
+        # optional bias for key/value
+        if add_bias_kv:
+            self.bias_k = nn.Parameter(torch.empty(1, 1, embed_dim, **factory_kwargs))
+            self.bias_v = nn.Parameter(torch.empty(1, 1, embed_dim, **factory_kwargs))
+        else:
+            self.bias_k = self.bias_v = None
+        
+        self.add_zero_attn = add_zero_attn
 
-    Returns:
-        out (Tensor): 与官方形状完全一致
-        attn_weights (Tensor or None): 与官方形状完全一致
-    """
+        self._reset_parameters()
 
-    # ----------------------------------
-    # 1. 维度处理
-    # ----------------------------------
-    if not batch_first:
-        # (L, N, E) -> (N, L, E)
-        query = query.transpose(0, 1)
-        key   = key.transpose(0, 1)
-        value = value.transpose(0, 1)
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.q_proj.weight)
+        nn.init.xavier_uniform_(self.k_proj.weight)
+        nn.init.xavier_uniform_(self.v_proj.weight)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+        if self.q_proj.bias is not None:
+            nn.init.constant_(self.q_proj.bias, 0.)
+            nn.init.constant_(self.k_proj.bias, 0.)
+            nn.init.constant_(self.v_proj.bias, 0.)
+            nn.init.constant_(self.out_proj.bias, 0.)
+        if self.bias_k is not None:
+            nn.init.xavier_normal_(self.bias_k)
+            nn.init.xavier_normal_(self.bias_v)
 
-    tgt_len, bsz, _ = query.shape[1], query.shape[0], query.shape[2]
+    def forward(self, query, key, value, key_padding_mask=None,
+                need_weights=True, attn_mask=None, average_attn_weights=True):
+        if self.batch_first:
+            query, key, value = query.transpose(0, 1), key.transpose(0, 1), value.transpose(0, 1)  # (L, N, E)
 
-    # 默认 kdim=embed_dim, vdim=embed_dim
-    kdim = kdim or embed_dim
-    vdim = vdim or embed_dim
+        L, N, E = query.shape
+        S = key.size(0)
 
-    assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
-    head_dim = embed_dim // num_heads
-    scaling = float(head_dim) ** -0.5
+        q = self.q_proj(query)
+        k = self.k_proj(key)
+        v = self.v_proj(value)
 
-    # ----------------------------------
-    # 2. 线性映射 Q, K, V
-    # ----------------------------------
-    # 使用 F.linear 手动实现三个独立映射，效果等价于 nn.Linear
-    # 权重矩阵形状: [embed_dim, qdim], [embed_dim, kdim], [embed_dim, vdim]
-    q_proj_weight = torch.randn(embed_dim, query.shape[-1])
-    k_proj_weight = torch.randn(embed_dim, kdim)
-    v_proj_weight = torch.randn(embed_dim, vdim)
+        if self.bias_k is not None:
+            k = torch.cat([k, self.bias_k.repeat(1, N, 1)], dim=0)
+            v = torch.cat([v, self.bias_v.repeat(1, N, 1)], dim=0)
+            if attn_mask is not None:
+                if attn_mask.dim() == 2:
+                    attn_mask = F.pad(attn_mask, (0, 1))
+                elif attn_mask.dim() == 3:
+                    attn_mask = F.pad(attn_mask, (0, 1))
+            if key_padding_mask is not None:
+                key_padding_mask = F.pad(key_padding_mask, (0, 1))
 
-    if bias:
-        q_proj_bias = torch.randn(embed_dim)
-        k_proj_bias = torch.randn(embed_dim)
-        v_proj_bias = torch.randn(embed_dim)
-    else:
-        q_proj_bias = k_proj_bias = v_proj_bias = None
+        q = q.contiguous().view(L, N * self.num_heads, self.head_dim).transpose(0, 1)  # (N*h, L, head_dim)
+        k = k.contiguous().view(-1, N * self.num_heads, self.head_dim).transpose(0, 1)  # (N*h, S, head_dim)
+        v = v.contiguous().view(-1, N * self.num_heads, self.head_dim).transpose(0, 1)  # (N*h, S, head_dim)
 
-    Q = F.linear(query, q_proj_weight, q_proj_bias)   # (N, L, E)
-    K = F.linear(key,   k_proj_weight, k_proj_bias)   # (N, S, E)
-    V = F.linear(value, v_proj_weight, v_proj_bias)   # (N, S, E)
+        if self.add_zero_attn:
+            k = torch.cat([k, torch.zeros((N * self.num_heads, 1, self.head_dim), device=k.device)], dim=1)
+            v = torch.cat([v, torch.zeros((N * self.num_heads, 1, self.head_dim), device=v.device)], dim=1)
+            if attn_mask is not None:
+                attn_mask = F.pad(attn_mask, (0, 1))
+            if key_padding_mask is not None:
+                key_padding_mask = F.pad(key_padding_mask, (0, 1))
 
-    # ----------------------------------
-    # 3. 拆多头 (N, L, E) -> (N, H, L, d_k)
-    # ----------------------------------
-    def reshape_for_heads(x: Tensor) -> Tensor:
-        # x: (N, L, E)
-        x = x.view(bsz, -1, num_heads, head_dim)
-        return x.permute(0, 2, 1, 3).contiguous()  # (N, H, L, d_k)
+        attn_output_weights = torch.bmm(q, k.transpose(1, 2)) / math.sqrt(self.head_dim)  # (N*h, L, S)
 
-    Q = reshape_for_heads(Q) * scaling
-    K = reshape_for_heads(K)
-    V = reshape_for_heads(V)
+        # ----- mask 处理 -----
+        if attn_mask is not None:
+            if attn_mask.dim() == 2:
+                attn_mask = attn_mask.unsqueeze(0)  # (1, L, S)
+            if attn_mask.size(0) == 1:
+                attn_mask = attn_mask.expand(N * self.num_heads, -1, -1)
+            attn_output_weights += attn_mask
 
-    # ----------------------------------
-    # 4. 计算注意力权重
-    # ----------------------------------
-    attn_scores = torch.matmul(Q, K.transpose(-2, -1))  # (N, H, L, S)
+        if key_padding_mask is not None:
+            key_padding_mask = key_padding_mask.unsqueeze(1).expand(-1, self.num_heads, -1)
+            key_padding_mask = key_padding_mask.reshape(N * self.num_heads, 1, S)
+            attn_output_weights = attn_output_weights.masked_fill(key_padding_mask, float('-inf'))
 
-    # 4.1 处理 attn_mask
-    if attn_mask is not None:
-        if attn_mask.dim() == 2:     # (L, S)
-            attn_mask = attn_mask.unsqueeze(0)  # (1, L, S)
-        attn_scores += attn_mask  # mask 中为 -inf 的位置 softmax 后为 0
+        attn_output_weights = F.softmax(attn_output_weights, dim=-1)
+        attn_output_weights = F.dropout(attn_output_weights, p=self.dropout, training=self.training)
 
-    # 4.2 处理 key_padding_mask
-    if key_padding_mask is not None:
-        # key_padding_mask: (N, S) True 代表掩掉
-        key_padding_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)  # (N, 1, 1, S)
-        attn_scores = attn_scores.masked_fill(key_padding_mask, float("-inf"))
+        attn_output = torch.bmm(attn_output_weights, v)  # (N*h, L, head_dim)
+        attn_output = attn_output.transpose(0, 1).contiguous().view(L, N, E)
+        attn_output = self.out_proj(attn_output)
 
-    attn_weights = F.softmax(attn_scores, dim=-1)
-    attn_weights = F.dropout(attn_weights, p=dropout, training=True)
+        if self.batch_first:
+            attn_output = attn_output.transpose(0, 1)  # (N, L, E)
 
-    # ----------------------------------
-    # 5. 加权求和
-    # ----------------------------------
-    attn_output = torch.matmul(attn_weights, V)  # (N, H, L, d_k)
-    attn_output = attn_output.permute(0, 2, 1, 3).contiguous()  # (N, L, H, d_k)
-    attn_output = attn_output.view(bsz, tgt_len, embed_dim)
-
-    # ----------------------------------
-    # 6. 输出映射 W^O
-    # ----------------------------------
-    out_proj_weight = torch.randn(embed_dim, embed_dim)
-    out_proj_bias   = torch.randn(embed_dim) if bias else None
-    attn_output = F.linear(attn_output, out_proj_weight, out_proj_bias)
-
-    # ----------------------------------
-    # 7. 形状还原
-    # ----------------------------------
-    if not batch_first:
-        attn_output = attn_output.transpose(0, 1)  # (L, N, E)
-
-    # ----------------------------------
-    # 8. attention weights 形状整理
-    # ----------------------------------
-    if need_weights:
-        # attn_weights: (N, H, L, S)
-        if average_attn_weights:
-            attn_weights = attn_weights.mean(dim=1)  # (N, L, S)
-    else:
-        attn_weights = None
-
-    return attn_output, attn_weights
+        if need_weights:
+            attn_output_weights = attn_output_weights.view(N, self.num_heads, L, S)
+            if average_attn_weights:
+                attn_output_weights = attn_output_weights.mean(dim=1)
+            return attn_output, attn_output_weights
+        else:
+            return attn_output, None
 
 
-# -------------------------------------------------
-# 单元测试：与 torch.nn.MultiheadAttention 对比
-# -------------------------------------------------
+def generate_encoder_mask(seq_len, device=None):
+    return torch.zeros(seq_len, seq_len, device=device)
+
+def generate_decoder_mask(seq_len, device=None):
+    mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1)
+    mask = mask.masked_fill(mask == 1, float('-inf'))
+    return mask
+
+
 if __name__ == "__main__":
     torch.manual_seed(42)
 
-    embed_dim, num_heads, batch, tgt_len, src_len = 512, 8, 3, 10, 20
-    query  = torch.randn(batch, tgt_len, embed_dim)
-    key    = torch.randn(batch, src_len, embed_dim)
-    value  = torch.randn(batch, src_len, embed_dim)
+    embed_dim = 768
+    num_heads = 8
+    batch_size = 2
+    seq_len = 6
 
-    # 官方实现
-    official = torch.nn.MultiheadAttention(
-        embed_dim=embed_dim,
-        num_heads=num_heads,
-        dropout=0.0,
-        bias=True,
-        batch_first=True
-    )
-    official.eval()
-    out_ref, attn_ref = official(query, key, value, need_weights=True)
+    # 官方 MHA
+    off_mha = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+    # 自定义 MHA
+    my_mha = CustomMultiheadAttention(embed_dim, num_heads, batch_first=True)
 
-    # 自定义实现：同步权重
-    with torch.no_grad():
-        # 将官方权重拷进自定义函数
-        def copy_weights():
-            # 这里简单地把官方权重拿出来，仅做一次性演示
-            pass  # 省略细节，可手动对齐
+    # 同步参数
+    my_mha.q_proj.weight.data = off_mha.in_proj_weight.data[:embed_dim, :].clone()
+    my_mha.k_proj.weight.data = off_mha.in_proj_weight.data[embed_dim:2*embed_dim, :].clone()
+    my_mha.v_proj.weight.data = off_mha.in_proj_weight.data[2*embed_dim:, :].clone()
 
-    out_my, attn_my = my_multi_head_attention(
-        query, key, value,
-        embed_dim=embed_dim,
-        num_heads=num_heads,
-        dropout=0.0,
-        bias=True,
-        batch_first=True,
-        need_weights=True
-    )
+    my_mha.q_proj.bias.data = off_mha.in_proj_bias.data[:embed_dim].clone()
+    my_mha.k_proj.bias.data = off_mha.in_proj_bias.data[embed_dim:2*embed_dim].clone()
+    my_mha.v_proj.bias.data = off_mha.in_proj_bias.data[2*embed_dim:].clone()
 
-    print("out difference:", torch.abs(out_ref - out_my).max().item())
-    print("attn difference:", torch.abs(attn_ref - attn_my).max().item())
+    my_mha.out_proj.weight.data = off_mha.out_proj.weight.data.clone()
+    my_mha.out_proj.bias.data = off_mha.out_proj.bias.data.clone()
+
+    x = torch.randn(batch_size, seq_len, embed_dim)
+
+    print("\n===== Encoder (双向) =====")
+    enc_mask = generate_encoder_mask(seq_len)
+    my_out, _ = my_mha(x, x, x, attn_mask=enc_mask)
+    off_out, _ = off_mha(x, x, x, attn_mask=enc_mask)
+    print("是否数值一致:", torch.allclose(my_out, off_out, atol=1e-6))
+    print("最大绝对误差:", (my_out - off_out).abs().max().item())
+
+    print("\n===== Decoder (因果) =====")
+    dec_mask = generate_decoder_mask(seq_len)
+    my_out, _ = my_mha(x, x, x, attn_mask=dec_mask)
+    off_out, _ = off_mha(x, x, x, attn_mask=dec_mask)
+    print("是否数值一致:", torch.allclose(my_out, off_out, atol=1e-6))
+    print("最大绝对误差:", (my_out - off_out).abs().max().item())
