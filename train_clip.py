@@ -16,7 +16,7 @@ from transformers import (
 )
 
 # ========= 全局配置 =========
-COCO_ROOT = r"D:\datasets\coco"  # 必须是包含 annotations/train2017/val2017 的根目录
+COCO_ROOT = r"C:\Users\61556\Downloads\data\coco"  # 必须是包含 annotations/train2017/val2017 的根目录
 SAVE_DIR = "./save"
 EPOCHS = 5
 BATCH_SIZE = 32
@@ -249,28 +249,29 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
 
+    # TODO: replace all siglip1 checkpoints to siglip2
+    # TODO: import dataloader from `data_loader.py`
     # Processor（含图像预处理+分词）
-    processor = SiglipProcessor.from_pretrained("google/siglip-base-patch16-224")
-
-    # 数据集
-    train_ds = CocoCaptionDataset(COCO_ROOT, split="train", processor=processor, max_length=MAX_LENGTH)
-    val_ds = CocoCaptionDataset(COCO_ROOT, split="val", processor=processor, max_length=MAX_LENGTH)
-
-    print("Train size:", len(train_ds), " | Val size:", len(val_ds))
-
-    # 可选：数据读取自检（导出图像网格与文本）
-    if DEBUG_CHECK:
-        debug_inspect_dataset(train_ds, "train")
-        debug_inspect_dataset(val_ds, "val")
-
-    # DataLoader
-    train_loader = DataLoader(
-        train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True
-    )
-    print("Train batches:", len(train_loader), " | Val batches:", len(val_loader))
+    # processor = SiglipProcessor.from_pretrained("google/siglip2-base-patch16-224")
+    #
+    # # 数据集
+    # train_ds = CocoCaptionDataset(COCO_ROOT, split="train", processor=processor, max_length=MAX_LENGTH)
+    # val_ds = CocoCaptionDataset(COCO_ROOT, split="val", processor=processor, max_length=MAX_LENGTH)
+    # print("Train size:", len(train_ds), " | Val size:", len(val_ds))
+    #
+    # # 可选：数据读取自检（导出图像网格与文本）
+    # if DEBUG_CHECK:
+    #     debug_inspect_dataset(train_ds, "train")
+    #     debug_inspect_dataset(val_ds, "val")
+    #
+    # # DataLoader
+    # train_loader = DataLoader(
+    #     train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True
+    # )
+    # val_loader = DataLoader(
+    #     val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True
+    # )
+    # print("Train batches:", len(train_loader), " | Val batches:", len(val_loader))
 
     # 模型 & 优化器 & 调度器
     model = SiglipDualEncoder("google/siglip-base-patch16-224").to(device)
