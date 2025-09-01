@@ -48,7 +48,7 @@ def get_dataloader(dataset,
 # ---------- COCO 数据集 ----------
 class COCODataset(Dataset):
     def __init__(self,
-                 root: str = r"D:\datasets\coco",
+                 root: str = r"D:/datasets/coco",
                  split: str = "train",
                  max_length: int = 77):      # CLIP 文本最大长度
         super().__init__()
