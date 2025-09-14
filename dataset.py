@@ -3,16 +3,15 @@ import json
 from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader
-from transformers import CLIPTokenizer, CLIPImageProcessor
+from transformers import AutoProcessor, AutoTokenizer
 
 
 # ---------- collate_fn ----------
 def collate_fn(batch):
-    image_tensors, input_ids, attention_mask = zip(*batch)
+    image_tensors, input_ids = zip(*batch)
     image_tensors = torch.cat([t.unsqueeze(0) for t in image_tensors], dim=0)
     input_ids = torch.cat([t.unsqueeze(0) for t in input_ids], dim=0)
-    attention_mask = torch.cat([t.unsqueeze(0) for t in attention_mask], dim=0)
-    return image_tensors, input_ids, attention_mask
+    return image_tensors, input_ids
 
 
 # ---------- DataLoader 封装 ----------
@@ -77,9 +76,9 @@ class COCODataset(Dataset):
         self.id2fname = id2fname
 
         # 3. CLIP tokenizer & image_processor
-        model_name = "openai/clip-vit-base-patch32"
-        self.tokenizer = CLIPTokenizer.from_pretrained(model_name)
-        self.image_processor = CLIPImageProcessor.from_pretrained(model_name)
+        model_name = "google/siglip2-base-patch16-224"
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.image_processor = AutoProcessor.from_pretrained(model_name)
 
     def __len__(self):
         return len(self.samples)
@@ -91,11 +90,11 @@ class COCODataset(Dataset):
         img_path = os.path.join(self.root, f"{self.split}2017", fname)
         image = Image.open(img_path).convert("RGB")
 
-        # CLIP 官方图像预处理
+        # CLIP 官方图像预处理 -> SIGLIP
         pixel_values = self.image_processor(
             images=image, return_tensors="pt")["pixel_values"].squeeze(0)
 
-        # CLIP 官方文本编码
+        # CLIP 官方文本编码 -> SIGLIP
         enc = self.tokenizer(
             caption,
             max_length=self.max_length,
@@ -104,9 +103,8 @@ class COCODataset(Dataset):
             return_tensors="pt"
         )
         input_ids = enc["input_ids"].squeeze(0)
-        attention_mask = enc["attention_mask"].squeeze(0)
 
-        return pixel_values, input_ids, attention_mask
+        return pixel_values, input_ids
 
 
 # ---------- 本地测试 ----------
@@ -114,14 +112,12 @@ if __name__ == "__main__":
     ds = COCODataset(root=r"C:\Users\61556\Downloads\data\coco", split="val")
     print("Dataset size:", len(ds))
 
-    img, ids, mask = ds[0]
+    img, ids = ds[0]
     print("Image shape:", img.shape)
     print("Token ids shape:", ids.shape)
-    print("Attention mask shape:", mask.shape)
 
     loader = get_dataloader(ds, batch_size=4, shuffle=True)
-    for imgs, ids, mask in loader:
+    for imgs, ids in loader:
         print("Batch image tensors shape:", imgs.shape)
         print("Batch input IDs shape:", ids.shape)
-        print("Batch attention mask shape:", mask.shape)
         break

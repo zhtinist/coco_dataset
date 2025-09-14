@@ -8,14 +8,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from transformers import (
-    CLIPImageProcessor,
-    CLIPTokenizer,
+    AutoProcessor,
+    AutoTokenizer,
     AutoModel,
     get_cosine_schedule_with_warmup,
 )
 
 # ========= 全局配置 =========
-COCO_ROOT = r"D:/datasets/coco"  # 必须是包含 annotations/train2017/val2017 的根目录
+COCO_ROOT = "C:\\Users\\61556\\Downloads\\data\\coco"  # 必须是包含 annotations/train2017/val2017 的根目录
 SAVE_DIR = "./save"
 EPOCHS = 5
 BATCH_SIZE = 32
@@ -73,20 +73,20 @@ from dataset import COCODataset, get_dataloader  # 从 dataset.py 导入数据�
 
 # ========= 模型 & 训练 =========
 class SiglipDualEncoder(nn.Module):
-    def __init__(self, model_name="google/siglip2-base-patch16-384"):
+    def __init__(self, model_name="google/siglip2-base-patch16-224"):
         super().__init__()
         self.model = AutoModel.from_pretrained(model_name)  # 使用 AutoModel 加载模型
-        self.logit_scale = nn.Parameter(torch.tensor(math.log(1 / 0.07)))  # 可学习温度
+        self.logit_scale = nn.Parameter(torch.tensor(0.07))  # 可学习温度
 
-    def forward(self, pixel_values, input_ids, attention_mask):
+    def forward(self, pixel_values, input_ids):
         # 获取图像和文本的嵌入
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, pixel_values=pixel_values)
+        outputs = self.model(input_ids=input_ids, pixel_values=pixel_values)
         v = outputs.image_embeds
         t = outputs.text_embeds
         v = nn.functional.normalize(v, p=2, dim=-1)
         t = nn.functional.normalize(t, p=2, dim=-1)
         logits = v @ t.T  # 余弦相似（已 L2）
-        return logits * self.logit_scale.exp()
+        return logits / self.logit_scale
 
 
 def symmetric_ce_loss(logits):
@@ -118,11 +118,11 @@ def train_one_epoch(model, loader, optimizer, scheduler, device):
     total_loss = 0.0
     steps = 0
     for step, batch in enumerate(loader, 1):
-        pixel_values = batch["pixel_values"].to(device, non_blocking=True)
-        input_ids = batch["input_ids"].to(device, non_blocking=True)
-        attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+        pixel_values, input_ids = batch
+        pixel_values = pixel_values.to(device, non_blocking=True)
+        input_ids = input_ids.to(device, non_blocking=True)
 
-        logits = model(pixel_values, input_ids, attention_mask)
+        logits = model(pixel_values, input_ids)
         loss = symmetric_ce_loss(logits)
 
         optimizer.zero_grad(set_to_none=True)
@@ -170,16 +170,11 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
-
-    # 图像处理器和文本处理器（直接使用 CLIPImageProcessor 和 CLIPTokenizer）
-    image_processor = CLIPImageProcessor.from_pretrained("google/siglip2-base-patch16-384")
-    tokenizer = CLIPTokenizer.from_pretrained("google/siglip2-base-patch16-384")
     
     # 数据集
-    train_ds = COCODataset(COCO_ROOT, split="train", processor=image_processor, tokenizer=tokenizer, max_length=MAX_LENGTH)
-    val_ds = COCODataset(COCO_ROOT, split="val", processor=image_processor, tokenizer=tokenizer, max_length=MAX_LENGTH)
+    train_ds = COCODataset(COCO_ROOT, split="val", max_length=MAX_LENGTH)
+    val_ds = COCODataset(COCO_ROOT, split="val", max_length=MAX_LENGTH)
     print("Train size:", len(train_ds), " | Val size:", len(val_ds))
-
 
     # DataLoader
     train_loader = get_dataloader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
@@ -187,7 +182,7 @@ def main():
     print("Train batches:", len(train_loader), " | Val batches:", len(val_loader))
 
     # 模型 & 优化器 & 调度器
-    model = SiglipDualEncoder("google/siglip2-base-patch16-384").to(device)
+    model = SiglipDualEncoder("google/siglip2-base-patch16-224").to(device)
     optimizer = build_optimizer(model, lr=1e-4, weight_decay=0.2)
     total_steps = max(1, len(train_loader) * EPOCHS)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=min(1000, total_steps // 10),
