@@ -1,15 +1,10 @@
 import os
-import math
-import json
 from PIL import Image
-from typing import Tuple, List
+from typing import List
 
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
 from transformers import (
-    AutoProcessor,
-    AutoTokenizer,
     AutoModel,
     get_cosine_schedule_with_warmup,
 )
@@ -68,7 +63,7 @@ def make_image_grid(images: List[Image.Image], cols: int = 3) -> Image.Image:
 
 
 # ========= 数据集 =========
-from dataset import COCODataset, get_dataloader  # 从 dataset.py 导入数据加载器
+from coco.data.coco_clip_dataset import COCODataset, get_dataloader  # 从 coco_caption_dataset.py 导入数据加载器
 
 
 # ========= 模型 & 训练 =========
